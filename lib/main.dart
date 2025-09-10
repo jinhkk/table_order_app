@@ -7,7 +7,25 @@ import 'dart:io';
 const String serverIp = '127.0.0.1'; // 윈도우에서 실행 중이므로 localhost로 설정
 
 void main() {
-  runApp(const TableOrderApp());
+  runApp(const MyApp());
+}
+
+// -------------------------------------------------------------
+// 새로운 MyApp 클래스 추가 (앱의 최상단 위젯)
+// -------------------------------------------------------------
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Table Order App',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+      ),
+      home: const TableOrderApp(),
+    );
+  }
 }
 
 // -------------------------------------------------------------
@@ -179,12 +197,17 @@ class _TableOrderAppState extends State<TableOrderApp> {
       orderItems: orderItems,
     );
 
+
     try {
       final response = await http.post(
         Uri.parse('http://$serverIp:8080/api/orders/'),
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
         body: jsonEncode(orderDto.toJson()),
       );
+
 
       if (response.statusCode == 200 || response.statusCode == 201) {
         _cart.clear();
@@ -192,30 +215,34 @@ class _TableOrderAppState extends State<TableOrderApp> {
           const SnackBar(content: Text('주문이 성공적으로 접수되었습니다!')),
         );
         setState(() {});
+      } else if (response.statusCode == 401) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('인증이 필요합니다. 로그인 후 다시 시도하세요.')),
+        );
+      } else if (response.statusCode == 403) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('접근 권한이 없습니다.')),
+        );
       } else {
-        final responseBody = utf8.decode(response.bodyBytes);
-        if (responseBody.isNotEmpty) {
-          final errorBody = jsonDecode(responseBody);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('주문 실패: ${errorBody['message']}')),
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('주문 실패: 서버 응답 오류')),
-          );
-        }
+        final responseBody = response.body;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('주문 실패 (${response.statusCode}): $responseBody')),
+        );
       }
     } catch (e) {
-      print('주문 전송 중 오류 발생: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('주문 실패: ${e.toString()}')),
-      );
+      print('주문 전송 중 예외 발생: $e');
+      if (e.toString().contains('SocketException') || e.toString().contains('Connection refused')) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('네트워크 오류: ${e.toString()}')),
+        );
+      }
     }
   }
 
-  // -------------------------------------------------------------
-  // 4. UI 화면을 그리는 build 메서드
-  // -------------------------------------------------------------
   @override
   Widget build(BuildContext context) {
     double totalAmount = _cart.values.fold(0.0, (sum, item) {
@@ -223,198 +250,195 @@ class _TableOrderAppState extends State<TableOrderApp> {
       return sum + (menuItem?.price ?? 0.0) * item.quantity;
     });
 
-    return MaterialApp(
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text('테이블 오더'),
-        ),
-        body: Row(
-          children: [
-            // 왼쪽: 카테고리 목록
-            SizedBox(
-              width: 150,
-              child: ListView.builder(
-                itemCount: categories.length,
-                itemBuilder: (context, index) {
-                  final category = categories[index];
-                  return ListTile(
-                    title: Text(category.name),
-                    selected: selectedCategoryId == category.id,
-                    onTap: () {
-                      setState(() {
-                        selectedCategoryId = category.id;
-                        _fetchMenuItems(selectedCategoryId!);
-                      });
-                    },
-                  );
-                },
-              ),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('테이블 오더'),
+      ),
+      body: Row(
+        children: [
+          // 왼쪽: 카테고리 목록
+          SizedBox(
+            width: 150,
+            child: ListView.builder(
+              itemCount: categories.length,
+              itemBuilder: (context, index) {
+                final category = categories[index];
+                return ListTile(
+                  title: Text(category.name),
+                  selected: selectedCategoryId == category.id,
+                  onTap: () {
+                    setState(() {
+                      selectedCategoryId = category.id;
+                      _fetchMenuItems(selectedCategoryId!);
+                    });
+                  },
+                );
+              },
             ),
-            // 가운데: 메뉴 목록
-            Expanded(
-              child: isLoading
-                  ? const Center(child: CircularProgressIndicator())
-                  : GridView.builder(
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  childAspectRatio: 0.8,
-                  crossAxisSpacing: 10,
-                  mainAxisSpacing: 10,
-                ),
-                itemCount: menuItems.length,
-                padding: const EdgeInsets.all(10),
-                itemBuilder: (context, index) {
-                  final menuItem = menuItems[index];
-                  return InkWell(
-                    onTap: menuItem.isSoldOut
-                        ? null
-                        : () {
-                      // 👇 이 부분이 모달을 띄우는 새로운 코드입니다.
-                      showDialog(
-                        context: context,
-                        builder: (BuildContext dialogContext) {
-                          return AddMenuItemModal(
-                            menuItem: menuItem,
-                            onAdd: (quantity) {
-                              if (quantity > 0) {
-                                setState(() {
-                                  if (_cart.containsKey(menuItem.id)) {
-                                    _cart[menuItem.id]!.quantity += quantity;
-                                  } else {
-                                    _cart[menuItem.id] = OrderItemRequest(
-                                      menuItemId: menuItem.id,
-                                      quantity: quantity,
-                                    );
-                                  }
-                                });
-                                ScaffoldMessenger.of(dialogContext).showSnackBar(
-                                  SnackBar(
-                                    content: Text('${menuItem.name} ${quantity}개를 담았습니다.'),
-                                    duration: const Duration(milliseconds: 1000),
-                                  ),
-                                );
-                              }
-                            },
-                          );
-                        },
-                      );
-                    },
-                    child: Card(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Expanded(
-                            child: Image.network(
-                              menuItem.imageUrl ?? 'https://via.placeholder.com/150',
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.all(8.0),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  menuItem.name,
-                                  style: const TextStyle(fontWeight: FontWeight.bold),
-                                ),
-                                Text('${menuItem.price.toStringAsFixed(0)}원'),
-                                Text(
-                                  menuItem.description ?? '',
-                                  style: const TextStyle(fontSize: 12, color: Colors.grey),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
+          ),
+          // 가운데: 메뉴 목록
+          Expanded(
+            child: isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : GridView.builder(
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                childAspectRatio: 0.8,
+                crossAxisSpacing: 10,
+                mainAxisSpacing: 10,
               ),
-            ),
-            // 오른쪽: 장바구니 목록과 총액
-            SizedBox(
-              width: 250,
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Text('주문 목록', style: Theme.of(context).textTheme.headlineSmall),
-                  ),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: _cart.length,
-                      itemBuilder: (context, index) {
-                        final item = _cart.values.elementAt(index);
-                        final menuItem = _allMenuItems[item.menuItemId];
-
-                        if (menuItem == null) {
-                          return const SizedBox();
-                        }
-
-                        return ListTile(
-                          title: Text(menuItem.name),
-                          subtitle: Text('${(menuItem.price * item.quantity).toStringAsFixed(0)}원'),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(Icons.remove),
-                                onPressed: () {
-                                  setState(() {
-                                    if (item.quantity > 1) {
-                                      item.quantity--;
-                                    } else {
-                                      _cart.remove(item.menuItemId);
-                                    }
-                                  });
-                                },
-                              ),
-                              Text('${item.quantity}'),
-                              IconButton(
-                                icon: const Icon(Icons.add),
-                                onPressed: () {
-                                  setState(() {
-                                    item.quantity++;
-                                  });
-                                },
-                              ),
-                            ],
-                          ),
+              itemCount: menuItems.length,
+              padding: const EdgeInsets.all(10),
+              itemBuilder: (context, index) {
+                final menuItem = menuItems[index];
+                return InkWell(
+                  onTap: menuItem.isSoldOut
+                      ? null
+                      : () {
+                    showDialog(
+                      context: context,
+                      builder: (BuildContext dialogContext) {
+                        return AddMenuItemModal(
+                          menuItem: menuItem,
+                          onAdd: (quantity) {
+                            if (quantity > 0) {
+                              setState(() {
+                                if (_cart.containsKey(menuItem.id)) {
+                                  _cart[menuItem.id]!.quantity += quantity;
+                                } else {
+                                  _cart[menuItem.id] = OrderItemRequest(
+                                    menuItemId: menuItem.id,
+                                    quantity: quantity,
+                                  );
+                                }
+                              });
+                              ScaffoldMessenger.of(dialogContext).showSnackBar(
+                                SnackBar(
+                                  content: Text('${menuItem.name} ${quantity}개를 담았습니다.'),
+                                  duration: const Duration(milliseconds: 1000),
+                                ),
+                              );
+                            }
+                          },
                         );
                       },
-                    ),
-                  ),
-                  // 총액과 주문 버튼
-                  Container(
-                    padding: const EdgeInsets.all(16.0),
-                    color: Colors.grey[200],
+                    );
+                  },
+                  child: Card(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text('총 결제 금액', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                            Text('${totalAmount.toStringAsFixed(0)}원', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                          ],
+                        Expanded(
+                          child: Image.network(
+                            menuItem.imageUrl ?? 'https://via.placeholder.com/150',
+                            fit: BoxFit.cover,
+                          ),
                         ),
-                        const SizedBox(height: 10),
-                        ElevatedButton(
-                          onPressed: _cart.isEmpty ? null : _placeOrder,
-                          child: const Text('주문하기'),
+                        Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                menuItem.name,
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              Text('${menuItem.price.toStringAsFixed(0)}원'),
+                              Text(
+                                menuItem.description ?? '',
+                                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
                   ),
-                ],
-              ),
+                );
+              },
             ),
-          ],
-        ),
+          ),
+          // 오른쪽: 장바구니 목록과 총액
+          SizedBox(
+            width: 250,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text('주문 목록', style: Theme.of(context).textTheme.headlineSmall),
+                ),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: _cart.length,
+                    itemBuilder: (context, index) {
+                      final item = _cart.values.elementAt(index);
+                      final menuItem = _allMenuItems[item.menuItemId];
+
+                      if (menuItem == null) {
+                        return const SizedBox();
+                      }
+
+                      return ListTile(
+                        title: Text(menuItem.name),
+                        subtitle: Text('${(menuItem.price * item.quantity).toStringAsFixed(0)}원'),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.remove),
+                              onPressed: () {
+                                setState(() {
+                                  if (item.quantity > 1) {
+                                    item.quantity--;
+                                  } else {
+                                    _cart.remove(item.menuItemId);
+                                  }
+                                });
+                              },
+                            ),
+                            Text('${item.quantity}'),
+                            IconButton(
+                              icon: const Icon(Icons.add),
+                              onPressed: () {
+                                setState(() {
+                                  item.quantity++;
+                                });
+                              },
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                // 총액과 주문 버튼
+                Container(
+                  padding: const EdgeInsets.all(16.0),
+                  color: Colors.grey[200],
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('총 결제 금액', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                          Text('${totalAmount.toStringAsFixed(0)}원', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      ElevatedButton(
+                        onPressed: _cart.isEmpty ? null : _placeOrder,
+                        child: const Text('주문하기'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -422,7 +446,7 @@ class _TableOrderAppState extends State<TableOrderApp> {
 
 
 // -------------------------------------------------------------
-// 6. 새로 추가된 모달 위젯
+// 6. 모달 위젯
 // -------------------------------------------------------------
 class AddMenuItemModal extends StatefulWidget {
   final MenuItem menuItem;
@@ -447,35 +471,99 @@ class _AddMenuItemModalState extends State<AddMenuItemModal> {
 
     return AlertDialog(
       title: Text(widget.menuItem.name),
-      content: SingleChildScrollView(
+      contentPadding: const EdgeInsets.all(20),
+      content: SizedBox(
+        width: 400, // 고정 너비
+        height: 500, // 고정 높이
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            Image.network(
-              widget.menuItem.imageUrl ?? 'https://via.placeholder.com/200',
-              fit: BoxFit.cover,
+            // 이미지 영역 (고정 크기)
+            Container(
+              width: 350,
+              height: 250,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey[300]!),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.network(
+                  widget.menuItem.imageUrl ?? 'https://via.placeholder.com/350x250',
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) {
+                    return Container(
+                      color: Colors.grey[200],
+                      child: const Center(
+                        child: Icon(Icons.image_not_supported,
+                            size: 50,
+                            color: Colors.grey),
+                      ),
+                    );
+                  },
+                ),
+              ),
             ),
             const SizedBox(height: 16),
-            Text(widget.menuItem.description ?? '설명 없음'),
+
+            // 설명 영역 (고정 높이, 스크롤 가능)
+            Container(
+              height: 80,
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey[50],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey[200]!),
+              ),
+              child: SingleChildScrollView(
+                child: Text(
+                  widget.menuItem.description ?? '설명 없음',
+                  style: const TextStyle(fontSize: 14),
+                ),
+              ),
+            ),
+
             const SizedBox(height: 16),
-            Text('가격: ${totalPrice.toStringAsFixed(0)}원'),
+
+            // 가격 표시
+            Text(
+              '가격: ${totalPrice.toStringAsFixed(0)}원',
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.blue,
+              ),
+            ),
+
             const SizedBox(height: 16),
+
+            // 수량 선택
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 IconButton(
-                  icon: const Icon(Icons.remove),
-                  onPressed: () {
+                  icon: const Icon(Icons.remove_circle, size: 30),
+                  onPressed: _quantity > 1 ? () {
                     setState(() {
-                      if (_quantity > 1) {
-                        _quantity--;
-                      }
+                      _quantity--;
                     });
-                  },
+                  } : null,
                 ),
-                Text('수량: $_quantity'),
+                Container(
+                  width: 80,
+                  height: 40,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '$_quantity',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
                 IconButton(
-                  icon: const Icon(Icons.add),
+                  icon: const Icon(Icons.add_circle, size: 30),
                   onPressed: () {
                     setState(() {
                       _quantity++;
@@ -499,6 +587,9 @@ class _AddMenuItemModalState extends State<AddMenuItemModal> {
             widget.onAdd(_quantity);
             Navigator.of(context).pop();
           },
+          style: ElevatedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          ),
           child: const Text('장바구니에 담기'),
         ),
       ],
