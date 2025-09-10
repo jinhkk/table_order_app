@@ -3,18 +3,24 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:io';
+import 'package:shared_preferences/shared_preferences.dart'; // 👉 이 import를 추가했습니다.
+
+import 'table_setup_screen.dart';
 
 const String serverIp = '127.0.0.1'; // 윈도우에서 실행 중이므로 localhost로 설정
 
-void main() {
-  runApp(const MyApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  final tableNumber = prefs.getInt('tableNumber');
+
+  runApp(MyApp(initialTableNumber: tableNumber));
 }
 
-// -------------------------------------------------------------
-// 새로운 MyApp 클래스 추가 (앱의 최상단 위젯)
-// -------------------------------------------------------------
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  final int? initialTableNumber;
+
+  const MyApp({super.key, this.initialTableNumber});
 
   @override
   Widget build(BuildContext context) {
@@ -23,7 +29,9 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         primarySwatch: Colors.blue,
       ),
-      home: const TableOrderApp(),
+      home: initialTableNumber == null
+          ? const TableSetupScreen()
+          : TableOrderApp(tableNumber: initialTableNumber!), // 👉 수정
     );
   }
 }
@@ -109,14 +117,17 @@ class OrderRequestDto {
 // 3. 메인 어플리케이션 위젯 (상태를 관리하는 StatefulWidget)
 // -------------------------------------------------------------
 class TableOrderApp extends StatefulWidget {
-  const TableOrderApp({super.key});
+  // 👉 이 부분이 수정되었습니다.
+  final int tableNumber;
+  const TableOrderApp({super.key, required this.tableNumber});
 
   @override
   State<TableOrderApp> createState() => _TableOrderAppState();
 }
 
 class _TableOrderAppState extends State<TableOrderApp> {
-  final int tableNumber = 3; // 👉 임시 테이블 번호 (테스트용)
+  // 👉 이 부분도 수정되었습니다.
+  late final int tableNumber;
 
   List<Category> categories = [];
   List<MenuItem> menuItems = [];
@@ -129,6 +140,7 @@ class _TableOrderAppState extends State<TableOrderApp> {
   @override
   void initState() {
     super.initState();
+    tableNumber = widget.tableNumber; // 👉 이 부분을 추가했습니다.
     _fetchCategories();
   }
 
@@ -197,17 +209,12 @@ class _TableOrderAppState extends State<TableOrderApp> {
       orderItems: orderItems,
     );
 
-
     try {
       final response = await http.post(
         Uri.parse('http://$serverIp:8080/api/orders/'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
+        headers: {'Content-Type': 'application/json'},
         body: jsonEncode(orderDto.toJson()),
       );
-
 
       if (response.statusCode == 200 || response.statusCode == 201) {
         _cart.clear();
@@ -215,31 +222,24 @@ class _TableOrderAppState extends State<TableOrderApp> {
           const SnackBar(content: Text('주문이 성공적으로 접수되었습니다!')),
         );
         setState(() {});
-      } else if (response.statusCode == 401) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('인증이 필요합니다. 로그인 후 다시 시도하세요.')),
-        );
-      } else if (response.statusCode == 403) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('접근 권한이 없습니다.')),
-        );
       } else {
-        final responseBody = response.body;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('주문 실패 (${response.statusCode}): $responseBody')),
-        );
+        final responseBody = utf8.decode(response.bodyBytes);
+        if (responseBody.isNotEmpty) {
+          final errorBody = jsonDecode(responseBody);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('주문 실패: ${errorBody['message']}')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('주문 실패: 서버 응답 오류')),
+          );
+        }
       }
     } catch (e) {
-      print('주문 전송 중 예외 발생: $e');
-      if (e.toString().contains('SocketException') || e.toString().contains('Connection refused')) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.')),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('네트워크 오류: ${e.toString()}')),
-        );
-      }
+      print('주문 전송 중 오류 발생: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('주문 실패: ${e.toString()}')),
+      );
     }
   }
 
@@ -471,99 +471,35 @@ class _AddMenuItemModalState extends State<AddMenuItemModal> {
 
     return AlertDialog(
       title: Text(widget.menuItem.name),
-      contentPadding: const EdgeInsets.all(20),
-      content: SizedBox(
-        width: 400, // 고정 너비
-        height: 500, // 고정 높이
+      content: SingleChildScrollView(
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            // 이미지 영역 (고정 크기)
-            Container(
-              width: 350,
-              height: 250,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey[300]!),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.network(
-                  widget.menuItem.imageUrl ?? 'https://via.placeholder.com/350x250',
-                  fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) {
-                    return Container(
-                      color: Colors.grey[200],
-                      child: const Center(
-                        child: Icon(Icons.image_not_supported,
-                            size: 50,
-                            color: Colors.grey),
-                      ),
-                    );
-                  },
-                ),
-              ),
+            Image.network(
+              widget.menuItem.imageUrl ?? 'https://via.placeholder.com/200',
+              fit: BoxFit.cover,
             ),
             const SizedBox(height: 16),
-
-            // 설명 영역 (고정 높이, 스크롤 가능)
-            Container(
-              height: 80,
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.grey[50],
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey[200]!),
-              ),
-              child: SingleChildScrollView(
-                child: Text(
-                  widget.menuItem.description ?? '설명 없음',
-                  style: const TextStyle(fontSize: 14),
-                ),
-              ),
-            ),
-
+            Text(widget.menuItem.description ?? '설명 없음'),
             const SizedBox(height: 16),
-
-            // 가격 표시
-            Text(
-              '가격: ${totalPrice.toStringAsFixed(0)}원',
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: Colors.blue,
-              ),
-            ),
-
+            Text('가격: ${totalPrice.toStringAsFixed(0)}원'),
             const SizedBox(height: 16),
-
-            // 수량 선택
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 IconButton(
-                  icon: const Icon(Icons.remove_circle, size: 30),
-                  onPressed: _quantity > 1 ? () {
+                  icon: const Icon(Icons.remove),
+                  onPressed: () {
                     setState(() {
-                      _quantity--;
+                      if (_quantity > 1) {
+                        _quantity--;
+                      }
                     });
-                  } : null,
+                  },
                 ),
-                Container(
-                  width: 80,
-                  height: 40,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.grey),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '$_quantity',
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                ),
+                Text('수량: $_quantity'),
                 IconButton(
-                  icon: const Icon(Icons.add_circle, size: 30),
+                  icon: const Icon(Icons.add),
                   onPressed: () {
                     setState(() {
                       _quantity++;
@@ -587,9 +523,6 @@ class _AddMenuItemModalState extends State<AddMenuItemModal> {
             widget.onAdd(_quantity);
             Navigator.of(context).pop();
           },
-          style: ElevatedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-          ),
           child: const Text('장바구니에 담기'),
         ),
       ],
