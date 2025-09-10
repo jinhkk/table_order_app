@@ -1,33 +1,32 @@
 // lib/main.dart
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:table_order_app/table_setup_screen.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
-import 'table_setup_screen.dart';
-
-const String serverIp = '127.0.0.1'; // 윈도우에서 실행 중이므로 localhost로 설정
+// 🚨🚨🚨 중요: 이 주소는 반드시 본인 PC의 IP 주소로 설정해야 해! 🚨🚨🚨
+// (예: Windows에서 cmd 열고 'ipconfig' 쳐서 나오는 IPv4 주소)
+const String serverIp = '172.16.30.5'; // <--- ★★★★★★★ 이 IP를 본인 PC IP로 수정하세요! ★★★★★★★
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
   final tableNumber = prefs.getInt('tableNumber');
-
   runApp(MyApp(initialTableNumber: tableNumber));
 }
 
 class MyApp extends StatelessWidget {
   final int? initialTableNumber;
-
   const MyApp({super.key, this.initialTableNumber});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Table Order App',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-      ),
+      theme: ThemeData(primarySwatch: Colors.blue),
       home: initialTableNumber == null
           ? const TableSetupScreen()
           : TableOrderApp(tableNumber: initialTableNumber!),
@@ -42,9 +41,7 @@ class Category {
   final int id;
   final String name;
   Category({required this.id, required this.name});
-  factory Category.fromJson(Map<String, dynamic> json) {
-    return Category(id: json['id'], name: json['name']);
-  }
+  factory Category.fromJson(Map<String, dynamic> json) => Category(id: json['id'], name: json['name']);
 }
 
 class MenuItem {
@@ -54,64 +51,33 @@ class MenuItem {
   final double price;
   final String? imageUrl;
   final bool isSoldOut;
-
-  MenuItem({
-    required this.id,
-    required this.name,
-    this.description,
-    required this.price,
-    this.imageUrl,
-    required this.isSoldOut,
-  });
-
-  factory MenuItem.fromJson(Map<String, dynamic> json) {
-    return MenuItem(
-      id: json['id'],
-      name: json['name'],
-      description: json['description'],
-      price: (json['price'] as num).toDouble(),
-      imageUrl: json['imageUrl'],
-      isSoldOut: json['isSoldOut'] ?? false,
-    );
-  }
+  MenuItem({required this.id, required this.name, this.description, required this.price, this.imageUrl, required this.isSoldOut});
+  factory MenuItem.fromJson(Map<String, dynamic> json) => MenuItem(
+      id: json['id'], name: json['name'], description: json['description'],
+      price: (json['price'] as num).toDouble(), imageUrl: json['imageUrl'], isSoldOut: json['isSoldOut'] ?? false);
 }
 
 class AggregatedOrderItem {
   final String menuName;
   final int totalQuantity;
   final double totalPrice;
-
-  AggregatedOrderItem({
-    required this.menuName,
-    required this.totalQuantity,
-    required this.totalPrice,
-  });
-
-  factory AggregatedOrderItem.fromJson(Map<String, dynamic> json) {
-    return AggregatedOrderItem(
-      menuName: json['menuName'],
-      totalQuantity: json['totalQuantity'],
-      totalPrice: (json['totalPrice'] as num).toDouble(),
-    );
-  }
+  AggregatedOrderItem({required this.menuName, required this.totalQuantity, required this.totalPrice});
+  factory AggregatedOrderItem.fromJson(Map<String, dynamic> json) => AggregatedOrderItem(
+      menuName: json['menuName'], totalQuantity: json['totalQuantity'], totalPrice: (json['totalPrice'] as num).toDouble());
 }
 
 class OrderItemRequest {
   final int menuItemId;
   int quantity;
   OrderItemRequest({required this.menuItemId, required this.quantity});
-  Map<String, dynamic> toJson() {
-    return {'menuItemId': menuItemId, 'quantity': quantity};
-  }
+  Map<String, dynamic> toJson() => {'menuItemId': menuItemId, 'quantity': quantity};
 }
 
 class OrderRequestDto {
   final int tableNumber;
   final List<OrderItemRequest> orderItems;
   OrderRequestDto({required this.tableNumber, required this.orderItems});
-  Map<String, dynamic> toJson() {
-    return {'tableNumber': tableNumber, 'orderItems': orderItems.map((item) => item.toJson()).toList()};
-  }
+  Map<String, dynamic> toJson() => {'tableNumber': tableNumber, 'orderItems': orderItems.map((item) => item.toJson()).toList()};
 }
 
 // =============================================================
@@ -120,29 +86,66 @@ class OrderRequestDto {
 class TableOrderApp extends StatefulWidget {
   final int tableNumber;
   const TableOrderApp({super.key, required this.tableNumber});
-
   @override
   State<TableOrderApp> createState() => _TableOrderAppState();
 }
 
 class _TableOrderAppState extends State<TableOrderApp> {
   late final int tableNumber;
+  final _streamController = StreamController.broadcast();
 
+  List<AggregatedOrderItem> _unpaidOrders = [];
   List<Category> categories = [];
   List<MenuItem> menuItems = [];
   int? selectedCategoryId;
   bool isLoading = true;
   bool _isPlacingOrder = false;
-
   final Map<int, MenuItem> _allMenuItems = {};
   final Map<int, OrderItemRequest> _cart = {};
-  List<AggregatedOrderItem> _unpaidOrders = [];
 
   @override
   void initState() {
     super.initState();
     tableNumber = widget.tableNumber;
     _initialize();
+    _connectWebSocket();
+    _listenToWebSocketEvents();
+  }
+
+  @override
+  void dispose() {
+    _streamController.close();
+    super.dispose();
+  }
+
+  void _connectWebSocket() {
+    final channel = WebSocketChannel.connect(Uri.parse('ws://$serverIp:8080/ws/order'));
+    print("✅ [WebSocket] 연결 시도... (주소: ws://$serverIp:8080/ws/order)");
+
+    channel.stream.listen((message) {
+      _streamController.add(message);
+    }, onError: (error) {
+      print("❌ [WebSocket] 오류 발생: $error. 5초 후 재연결합니다.");
+      Future.delayed(const Duration(seconds: 5), _connectWebSocket);
+    }, onDone: () {
+      print("ℹ️ [WebSocket] 연결 종료됨. 5초 후 재연결합니다.");
+      Future.delayed(const Duration(seconds: 5), _connectWebSocket);
+    });
+  }
+
+  void _listenToWebSocketEvents() {
+    _streamController.stream.listen((message) {
+      if (!mounted) return;
+      print("✅ [메인 화면] 메시지 수신: $message");
+      final data = jsonDecode(message);
+
+      if (data['type'] == 'PAYMENT_COMPLETED' && data['tableNumber'].toString() == tableNumber.toString()) {
+        print("🎉 [메인 화면] 내 테이블($tableNumber) 결제 완료! 로컬 주문 목록을 즉시 비웁니다.");
+        setState(() {
+          _unpaidOrders.clear();
+        });
+      }
+    });
   }
 
   Future<void> _initialize() async {
@@ -163,7 +166,9 @@ class _TableOrderAppState extends State<TableOrderApp> {
             _fetchMenuItems(selectedCategoryId!);
           }
         });
-      } else { throw Exception('Failed to load categories'); }
+      } else {
+        throw Exception('Failed to load categories');
+      }
     } catch (e) {
       print('카테고리 로딩 실패: $e');
       if (mounted) setState(() { isLoading = false; });
@@ -181,9 +186,13 @@ class _TableOrderAppState extends State<TableOrderApp> {
         if (!mounted) return;
         setState(() {
           menuItems = fetchedItems;
-          for (var item in fetchedItems) { _allMenuItems[item.id] = item; }
+          for (var item in fetchedItems) {
+            _allMenuItems[item.id] = item;
+          }
         });
-      } else { throw Exception('Failed to load menu items'); }
+      } else {
+        throw Exception('Failed to load menu items');
+      }
     } catch (e) {
       print('메뉴 로딩 실패: $e');
     } finally {
@@ -195,107 +204,65 @@ class _TableOrderAppState extends State<TableOrderApp> {
     try {
       final response = await http.get(Uri.parse('http://$serverIp:8080/api/orders/table/$tableNumber/unpaid'));
       if (response.statusCode == 200) {
-        final List<dynamic> data = json.decode(utf8.decode(response.bodyBytes));
+        final data = json.decode(utf8.decode(response.bodyBytes));
         if (mounted) {
           setState(() {
-            _unpaidOrders = data.map((json) => AggregatedOrderItem.fromJson(json)).toList();
+            _unpaidOrders = (data as List).map((json) => AggregatedOrderItem.fromJson(json)).toList();
+            print("🔄 [데이터 갱신] 미결제 주문 목록을 새로고침했습니다. 현재 ${_unpaidOrders.length}건.");
           });
         }
-      } else { throw Exception('Failed to load unpaid orders'); }
+      } else {
+        throw Exception('Failed to load unpaid orders with status code: ${response.statusCode}');
+      }
     } catch (e) {
-      print('미결제 주문 로딩 실패: $e');
+      print('미결제 주문 로딩 중 오류 발생: $e');
+      if (mounted) {
+        setState(() {
+          _unpaidOrders.clear();
+        });
+      }
     }
   }
 
-  // ▼▼▼▼▼ [최종 수정] 진짜 최종 수정된 주문 로직입니다! ▼▼▼▼▼
   Future<void> _placeOrder() async {
     if (_cart.isEmpty || _isPlacingOrder) return;
-
-    setState(() {
-      _isPlacingOrder = true;
-    });
-
-    final orderDto = OrderRequestDto(
-      tableNumber: tableNumber,
-      orderItems: _cart.values.toList(),
-    );
-
+    setState(() { _isPlacingOrder = true; });
+    final orderDto = OrderRequestDto(tableNumber: tableNumber, orderItems: _cart.values.toList());
     try {
       final response = await http.post(
         Uri.parse('http://$serverIp:8080/api/orders/'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(orderDto.toJson()),
       );
-
       if (response.statusCode == 200 || response.statusCode == 201) {
-        // Optimistic UI: 서버에 다시 묻지 않고, 현재 장바구니를 기준으로 주문 내역을 즉시 업데이트
-        final newOrdersMap = Map<String, AggregatedOrderItem>.fromEntries(
-            _unpaidOrders.map((e) => MapEntry(e.menuName, e)));
-
-        _cart.forEach((menuItemId, cartItem) {
-          final menuItem = _allMenuItems[menuItemId]!;
-          if (newOrdersMap.containsKey(menuItem.name)) {
-            var existingItem = newOrdersMap[menuItem.name]!;
-            newOrdersMap[menuItem.name] = AggregatedOrderItem(
-              menuName: existingItem.menuName,
-              totalQuantity: existingItem.totalQuantity + cartItem.quantity,
-              totalPrice: existingItem.totalPrice + (menuItem.price * cartItem.quantity),
-            );
-          } else {
-            newOrdersMap[menuItem.name] = AggregatedOrderItem(
-              menuName: menuItem.name,
-              totalQuantity: cartItem.quantity,
-              totalPrice: menuItem.price * cartItem.quantity,
-            );
-          }
-        });
-
-        // 모든 상태 변경을 한 번의 setState에서 처리!
+        await _fetchUnpaidOrders(); // 주문 후에는 최신 주문 내역을 다시 불러온다.
         setState(() {
-          _unpaidOrders = newOrdersMap.values.toList();
           _cart.clear();
-          _isPlacingOrder = false; // 여기서 로딩 상태를 함께 해제
         });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('주문이 성공적으로 접수되었습니다!')),
-        );
-
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('주문이 성공적으로 접수되었습니다!')),);
       } else {
-        // 주문 실패 시에는 로딩 상태만 해제
-        setState(() {
-          _isPlacingOrder = false;
-        });
         final responseBody = utf8.decode(response.bodyBytes);
         final errorBody = jsonDecode(responseBody);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('주문 실패: ${errorBody['message']}')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('주문 실패: ${errorBody['message']}')),);
       }
     } catch (e) {
-      // 통신 에러 시에도 로딩 상태만 해제
-      setState(() {
-        _isPlacingOrder = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('주문 실패: ${e.toString()}')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('주문 실패: ${e.toString()}')),);
+    } finally {
+      if (mounted) {
+        setState(() { _isPlacingOrder = false; });
+      }
     }
-    // finally 블록을 제거하여 중복 setState 호출을 방지
   }
-
 
   @override
   Widget build(BuildContext context) {
-    double unpaidTotal = _unpaidOrders.fold(0.0, (sum, item) => sum + item.totalPrice);
-    double cartTotal = _cart.values.fold(0.0, (sum, item) {
+    double orderAmount = _cart.values.fold(0.0, (sum, item) {
       final menuItem = _allMenuItems[item.menuItemId];
       return sum + (menuItem?.price ?? 0.0) * item.quantity;
     });
-    double orderAmount = cartTotal;
 
     return Scaffold(
-      appBar: AppBar(title: Text('$tableNumber번 테이블'),),
+      appBar: AppBar(title: Text('$tableNumber번 테이블')),
       body: Row(
         children: [
           SizedBox(
@@ -329,9 +296,7 @@ class _TableOrderAppState extends State<TableOrderApp> {
               itemBuilder: (context, index) {
                 final menuItem = menuItems[index];
                 return InkWell(
-                  onTap: menuItem.isSoldOut || _isPlacingOrder
-                      ? null
-                      : () {
+                  onTap: menuItem.isSoldOut || _isPlacingOrder ? null : () {
                     showDialog(
                       context: context,
                       builder: (BuildContext dialogContext) {
@@ -343,14 +308,11 @@ class _TableOrderAppState extends State<TableOrderApp> {
                                 if (_cart.containsKey(menuItem.id)) {
                                   _cart[menuItem.id]!.quantity += quantity;
                                 } else {
-                                  _cart[menuItem.id] = OrderItemRequest(menuItemId: menuItem.id, quantity: quantity,);
+                                  _cart[menuItem.id] = OrderItemRequest(menuItemId: menuItem.id, quantity: quantity);
                                 }
                               });
                               ScaffoldMessenger.of(dialogContext).showSnackBar(
-                                SnackBar(
-                                  content: Text('${menuItem.name} ${quantity}개를 담았습니다.'),
-                                  duration: const Duration(milliseconds: 1000),
-                                ),
+                                SnackBar(content: Text('${menuItem.name} ${quantity}개를 담았습니다.'), duration: const Duration(milliseconds: 1000)),
                               );
                             }
                           },
@@ -362,15 +324,15 @@ class _TableOrderAppState extends State<TableOrderApp> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Expanded(child: Image.network(menuItem.imageUrl ?? 'https://via.placeholder.com/150', fit: BoxFit.cover,),),
+                        Expanded(child: Image.network(menuItem.imageUrl ?? 'https://via.placeholder.com/150', fit: BoxFit.cover)),
                         Padding(
                           padding: const EdgeInsets.all(8.0),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(menuItem.name, style: const TextStyle(fontWeight: FontWeight.bold),),
+                              Text(menuItem.name, style: const TextStyle(fontWeight: FontWeight.bold)),
                               Text('${menuItem.price.toStringAsFixed(0)}원'),
-                              Text(menuItem.description ?? '', style: const TextStyle(fontSize: 12, color: Colors.grey), maxLines: 2, overflow: TextOverflow.ellipsis,),
+                              Text(menuItem.description ?? '', style: const TextStyle(fontSize: 12, color: Colors.grey), maxLines: 2, overflow: TextOverflow.ellipsis),
                             ],
                           ),
                         ),
@@ -390,16 +352,16 @@ class _TableOrderAppState extends State<TableOrderApp> {
                   child: Text('주문 목록', style: Theme.of(context).textTheme.headlineSmall),
                 ),
                 ElevatedButton(
-                  onPressed: (_cart.isEmpty && _unpaidOrders.isEmpty) || _isPlacingOrder
-                      ? null
-                      : () {
+                  onPressed: (_cart.isEmpty && _unpaidOrders.isEmpty) || _isPlacingOrder ? null : () {
                     showDialog(
                       context: context,
                       builder: (BuildContext context) {
                         return OrderSummaryModal(
                           cart: _cart,
                           allMenuItems: _allMenuItems,
-                          unpaidOrders: _unpaidOrders,
+                          initialUnpaidOrders: _unpaidOrders,
+                          stream: _streamController.stream,
+                          tableNumber: tableNumber,
                         );
                       },
                     );
@@ -434,11 +396,7 @@ class _TableOrderAppState extends State<TableOrderApp> {
                             Text('${item.quantity}'),
                             IconButton(
                               icon: const Icon(Icons.add),
-                              onPressed: _isPlacingOrder ? null : () {
-                                setState(() {
-                                  item.quantity++;
-                                });
-                              },
+                              onPressed: _isPlacingOrder ? null : () { setState(() { item.quantity++; }); },
                             ),
                           ],
                         ),
@@ -496,118 +454,113 @@ class _AddMenuItemModalState extends State<AddMenuItemModal> {
     double totalPrice = widget.menuItem.price * _quantity;
     return AlertDialog(
       title: Text(widget.menuItem.name),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Image.network(widget.menuItem.imageUrl ?? 'https://via.placeholder.com/200', fit: BoxFit.cover,),
-            const SizedBox(height: 16),
-            Text(widget.menuItem.description ?? '설명 없음'),
-            const SizedBox(height: 16),
-            Text('가격: ${totalPrice.toStringAsFixed(0)}원'),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                IconButton(icon: const Icon(Icons.remove), onPressed: () { setState(() { if (_quantity > 1) _quantity--; }); },),
-                Text('수량: $_quantity'),
-                IconButton(icon: const Icon(Icons.add), onPressed: () { setState(() { _quantity++; }); },),
-              ],
-            ),
-          ],
-        ),
-      ),
+      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Image.network(widget.menuItem.imageUrl ?? 'https://via.placeholder.com/200', fit: BoxFit.cover),
+        const SizedBox(height: 16),
+        Text(widget.menuItem.description ?? '설명 없음'),
+        const SizedBox(height: 16),
+        Text('가격: ${totalPrice.toStringAsFixed(0)}원'),
+        const SizedBox(height: 16),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          IconButton(icon: const Icon(Icons.remove), onPressed: () { setState(() { if (_quantity > 1) _quantity--; }); }),
+          Text('수량: $_quantity'),
+          IconButton(icon: const Icon(Icons.add), onPressed: () { setState(() { _quantity++; }); }),
+        ],),
+      ],),),
       actions: [
-        TextButton(onPressed: () { Navigator.of(context).pop(); }, child: const Text('취소'),),
-        ElevatedButton(onPressed: () { widget.onAdd(_quantity); Navigator.of(context).pop(); }, child: const Text('장바구니에 담기'),
-        ),
+        TextButton(onPressed: () { Navigator.of(context).pop(); }, child: const Text('취소')),
+        ElevatedButton(onPressed: () { widget.onAdd(_quantity); Navigator.of(context).pop(); }, child: const Text('장바구니에 담기')),
       ],
     );
   }
 }
 
-class OrderSummaryModal extends StatelessWidget {
+class OrderSummaryModal extends StatefulWidget {
   final Map<int, OrderItemRequest> cart;
   final Map<int, MenuItem> allMenuItems;
-  final List<AggregatedOrderItem> unpaidOrders;
+  final List<AggregatedOrderItem> initialUnpaidOrders;
+  final Stream<dynamic> stream;
+  final int tableNumber;
 
   const OrderSummaryModal({
     super.key,
     required this.cart,
     required this.allMenuItems,
-    required this.unpaidOrders,
+    required this.initialUnpaidOrders,
+    required this.stream,
+    required this.tableNumber,
   });
+
+  @override
+  State<OrderSummaryModal> createState() => _OrderSummaryModalState();
+}
+
+class _OrderSummaryModalState extends State<OrderSummaryModal> {
+  late List<AggregatedOrderItem> unpaidOrders;
+  StreamSubscription? _streamSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    unpaidOrders = List.from(widget.initialUnpaidOrders);
+    _streamSubscription = widget.stream.listen((message) {
+      if (!mounted) return;
+      print("✅ [팝업창] 메시지 수신: $message");
+      final data = jsonDecode(message);
+
+      if (data['type'] == 'PAYMENT_COMPLETED' && data['tableNumber'].toString() == widget.tableNumber.toString()) {
+        print("🎉 [팝업창] 내 테이블 결제 완료! 팝업 내역을 비웁니다.");
+        setState(() {
+          unpaidOrders.clear();
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _streamSubscription?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     double unpaidTotal = unpaidOrders.fold(0.0, (sum, item) => sum + item.totalPrice);
-    double cartTotal = cart.values.fold(0.0, (sum, item) {
-      final menuItem = allMenuItems[item.menuItemId];
+    double cartTotal = widget.cart.values.fold(0.0, (sum, item) {
+      final menuItem = widget.allMenuItems[item.menuItemId];
       return sum + (menuItem?.price ?? 0.0) * item.quantity;
     });
     double totalPaymentAmount = unpaidTotal + cartTotal;
-
     List<Widget> listItems = [];
 
     if (unpaidOrders.isNotEmpty) {
       listItems.add(const ListTile(title: Text("--- 주문 완료된 내역 ---", style: TextStyle(color: Colors.grey))));
       for (var item in unpaidOrders) {
-        listItems.add(ListTile(
-          title: Text(item.menuName),
-          subtitle: Text('총 ${item.totalQuantity}개'),
-          trailing: Text('${item.totalPrice.toStringAsFixed(0)}원'),
-        ));
+        listItems.add(ListTile(title: Text(item.menuName), subtitle: Text('총 ${item.totalQuantity}개'), trailing: Text('${item.totalPrice.toStringAsFixed(0)}원')));
       }
     }
-
-    if (cart.isNotEmpty) {
+    if (widget.cart.isNotEmpty) {
       listItems.add(const ListTile(title: Text("--- 장바구니 ---", style: TextStyle(color: Colors.blue))));
-      for (var cartItem in cart.values) {
-        final menuItem = allMenuItems[cartItem.menuItemId]!;
-        listItems.add(ListTile(
-          title: Text(menuItem.name),
-          subtitle: Text('${menuItem.price.toStringAsFixed(0)}원 x ${cartItem.quantity}'),
-          trailing: Text('${(menuItem.price * cartItem.quantity).toStringAsFixed(0)}원', style: const TextStyle(color: Colors.blue)),
-        ));
+      for (var cartItem in widget.cart.values) {
+        final menuItem = widget.allMenuItems[cartItem.menuItemId]!;
+        listItems.add(ListTile(title: Text(menuItem.name), subtitle: Text('${menuItem.price.toStringAsFixed(0)}원 x ${cartItem.quantity}'), trailing: Text('${(menuItem.price * cartItem.quantity).toStringAsFixed(0)}원', style: const TextStyle(color: Colors.blue))));
       }
+    }
+    if (listItems.isEmpty) {
+      listItems.add(const ListTile(title: Center(child: Text("결제가 완료되었거나 주문 내역이 없습니다."))));
     }
 
     return AlertDialog(
       title: const Text('현재 주문 내역'),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: listItems.length,
-                itemBuilder: (context, index) {
-                  return listItems[index];
-                },
-              ),
-            ),
-            const Divider(),
-            Padding(
-              padding: const EdgeInsets.only(top: 8.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('총 결제 금액', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                  Text('${totalPaymentAmount.toStringAsFixed(0)}원', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('닫기'),
-        ),
-      ],
+      content: SizedBox(width: double.maxFinite, child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Flexible(child: ListView(shrinkWrap: true, children: listItems)),
+        const Divider(),
+        Padding(padding: const EdgeInsets.only(top: 8.0), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          const Text('총 결제 금액', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+          Text('${totalPaymentAmount.toStringAsFixed(0)}원', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+        ],),),
+      ],),),
+      actions: [ TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('닫기')), ],
     );
   }
 }
